@@ -2,11 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', function () {
-    return response()->json([
-        'name'    => 'Laravel Elasticsearch Demo',
-        'version' => '1.0.0',
-        'api'     => '/api/products/search',
-        'docs'    => 'See README.md for full API documentation',
-    ]);
-});
+// All non-API routes serve the React SPA
+Route::get('/{any?}', function () {
+    return view('app');
+})->where('any', '.*');
