@@ -12,9 +12,7 @@ export function PriceStats({ stats, totalStock, uniqueBrands, tookMs, total }) {
     return (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
             <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                    Axtarış Statistikası
-                </h3>
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Axtarış Statistikası</h3>
                 <span className="text-xs text-gray-400">{total?.toLocaleString()} nəticə · {tookMs}ms</span>
             </div>
             <div className="grid grid-cols-5 gap-3">

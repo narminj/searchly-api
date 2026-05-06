@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Highlight text from Elasticsearch */
+/* Elasticsearch highlighted terms */
 em {
     font-style: normal;
     background-color: #fef08a;
@@ -9,7 +9,6 @@ em {
     padding: 0 2px;
 }
 
-/* Line clamp utilities */
 .line-clamp-2 {
     display: -webkit-box;
     -webkit-line-clamp: 2;

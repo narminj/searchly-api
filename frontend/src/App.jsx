@@ -3,10 +3,7 @@ import { SearchPage } from '@/pages/SearchPage'
 
 const queryClient = new QueryClient({
     defaultOptions: {
-        queries: {
-            retry: 1,
-            refetchOnWindowFocus: false,
-        },
+        queries: { retry: 1, refetchOnWindowFocus: false },
     },
 })
 

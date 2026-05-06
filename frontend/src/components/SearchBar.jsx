@@ -10,7 +10,6 @@ export function SearchBar({ value, onChange }) {
     const listRef           = useRef(null)
     const debouncedTyped    = useDebounce(typed, 300)
 
-    // Sync external value changes (e.g. reset)
     useEffect(() => { setTyped(value) }, [value])
 
     const { data: suggestions = [] } = useQuery({
@@ -20,36 +19,17 @@ export function SearchBar({ value, onChange }) {
         staleTime: 60_000,
     })
 
-    const handleChange = (e) => {
-        setTyped(e.target.value)
-        setOpen(true)
-    }
+    const handleSelect = (name) => { setTyped(name); onChange(name); setOpen(false) }
+    const handleSubmit = (e)    => { e.preventDefault(); onChange(typed); setOpen(false) }
 
-    const handleSelect = (name) => {
-        setTyped(name)
-        onChange(name)
-        setOpen(false)
-        inputRef.current?.blur()
-    }
-
-    const handleSubmit = (e) => {
-        e.preventDefault()
-        onChange(typed)
-        setOpen(false)
-    }
-
-    // Close dropdown when clicking outside
     useEffect(() => {
-        const handler = (e) => {
-            if (!inputRef.current?.contains(e.target) && !listRef.current?.contains(e.target)) {
+        const h = (e) => {
+            if (!inputRef.current?.contains(e.target) && !listRef.current?.contains(e.target))
                 setOpen(false)
-            }
         }
-        document.addEventListener('mousedown', handler)
-        return () => document.removeEventListener('mousedown', handler)
+        document.addEventListener('mousedown', h)
+        return () => document.removeEventListener('mousedown', h)
     }, [])
-
-    const showDropdown = open && suggestions.length > 0
 
     return (
         <form onSubmit={handleSubmit} className="relative w-full">
@@ -59,12 +39,11 @@ export function SearchBar({ value, onChange }) {
                         ref={inputRef}
                         type="text"
                         value={typed}
-                        onChange={handleChange}
+                        onChange={e => { setTyped(e.target.value); setOpen(true) }}
                         onFocus={() => setOpen(true)}
                         placeholder="Məhsul axtarın... (Samsung, laptop, nike...)"
-                        className="w-full px-4 py-3 pl-11 text-gray-900 bg-white border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-base"
+                        className="w-full px-4 py-3 pl-11 bg-white border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
                     />
-                    {/* Search icon */}
                     <svg className="absolute left-3 top-3.5 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                     </svg>
@@ -83,8 +62,7 @@ export function SearchBar({ value, onChange }) {
                 </button>
             </div>
 
-            {/* Autocomplete dropdown */}
-            {showDropdown && (
+            {open && suggestions.length > 0 && (
                 <ul ref={listRef}
                     className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden max-h-60 overflow-y-auto">
                     {suggestions.map((name, i) => (
