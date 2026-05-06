@@ -24,11 +24,10 @@ export function useSearch() {
     const params = {
         q: debouncedQuery,
         ...debouncedFilters,
-        // Boolean must be sent as 1/0 for Laravel validation
         in_stock: debouncedFilters.in_stock ? 1 : undefined,
     }
 
-    const { data, isLoading, isError, error } = useQuery({
+    const { data, isLoading, isError } = useQuery({
         queryKey: ['products', params],
         queryFn: () => searchProducts(params),
         keepPreviousData: true,
@@ -49,15 +48,9 @@ export function useSearch() {
     }, [])
 
     return {
-        query,
-        setQuery,
-        filters,
-        setFilter,
-        setPage,
-        resetFilters,
+        query, setQuery,
+        filters, setFilter, setPage, resetFilters,
         results: data ?? null,
-        isLoading,
-        isError,
-        error,
+        isLoading, isError,
     }
 }
