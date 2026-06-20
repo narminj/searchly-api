@@ -8,10 +8,10 @@ use Illuminate\Console\Command;
 class ElasticsearchCreateIndex extends Command
 {
     protected $signature = 'elasticsearch:create-index
-                            {index? : Index key from config (default: products)}
-                            {--force : Recreate even if the index already exists}';
+                            {index? : Index key from config (default: products)}';
 
-    protected $description = 'Create an Elasticsearch index with settings and mappings from config';
+    protected $description = 'Bootstrap an empty versioned index ({name}_v1) behind its alias. '
+        . 'For rebuilds of an existing index use elasticsearch:migrate.';
 
     public function handle(ElasticsearchService $es): int
     {
@@ -27,25 +27,22 @@ class ElasticsearchCreateIndex extends Command
         $indexName = $indexCfg['name'];
 
         if ($es->existsIndex($indexName)) {
-            if (! $this->option('force')) {
-                $this->warn("Index '{$indexName}' already exists. Use --force to recreate it.");
+            $this->warn("'{$indexName}' already exists (as an index or alias). Use 'elasticsearch:migrate {$key}' for versioned rebuilds.");
 
-                return self::SUCCESS;
-            }
-
-            $this->info("Deleting existing index '{$indexName}'...");
-            $es->deleteIndex($indexName);
+            return self::FAILURE;
         }
 
-        $this->info("Creating index '{$indexName}'...");
+        $physical = "{$indexName}_v1";
+        $this->info("Creating index '{$physical}' with alias '{$indexName}'...");
 
         $es->createIndex(
-            $indexName,
+            $physical,
             $indexCfg['settings'] ?? [],
-            $indexCfg['mappings'] ?? []
+            $indexCfg['mappings'] ?? [],
+            [$indexName => (object) []]
         );
 
-        $this->info("Index '{$indexName}' created successfully.");
+        $this->info("Index '{$physical}' created successfully (alias: '{$indexName}').");
 
         $settings = $indexCfg['settings'] ?? [];
         $this->table(

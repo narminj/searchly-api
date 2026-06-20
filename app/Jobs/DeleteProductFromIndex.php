@@ -20,10 +20,15 @@ class DeleteProductFromIndex implements ShouldQueue
     public function __construct(
         public readonly int $productId,
         public readonly string $index
-    ) {}
+    ) {
+        $this->onQueue('indexing');
+        // Don't remove a document for a delete that may still roll back
+        $this->afterCommit();
+    }
 
     public function handle(ElasticsearchService $es): void
     {
+        // deleteDocument treats a 404 as success, so this job is idempotent
         $es->deleteDocument($this->index, $this->productId);
     }
 }

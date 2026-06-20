@@ -6,6 +6,7 @@ use App\Jobs\DeleteProductFromIndex;
 use App\Jobs\IndexProduct;
 use App\Models\Product;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -13,49 +14,107 @@ class ProductIndexingTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_creating_product_dispatches_index_job(): void
+    /**
+     * IndexProduct is unique-until-processing; with Queue::fake() jobs never
+     * process, so the unique lock must be cleared before re-dispatching for
+     * the same product within a test.
+     */
+    private function resetQueue(): void
+    {
+        Queue::fake();
+        Cache::flush();
+    }
+
+    public function test_creating_active_product_dispatches_index_job(): void
     {
         Queue::fake();
 
-        Product::factory()->create();
+        Product::factory()->create(['is_active' => true]);
 
         Queue::assertPushed(IndexProduct::class, 1);
+        Queue::assertPushedOn('indexing', IndexProduct::class);
+    }
+
+    public function test_creating_inactive_product_does_not_dispatch_index_job(): void
+    {
+        Queue::fake();
+
+        Product::factory()->inactive()->create();
+
+        Queue::assertNotPushed(IndexProduct::class);
     }
 
     public function test_updating_product_dispatches_index_job(): void
     {
         Queue::fake();
 
-        $product = Product::factory()->create();
+        $product = Product::factory()->create(['is_active' => true]);
 
         Queue::assertPushed(IndexProduct::class, 1);
-        Queue::fake(); // Reset
+        $this->resetQueue();
 
         $product->update(['price' => 999.99]);
 
         Queue::assertPushed(IndexProduct::class, 1);
     }
 
+    public function test_update_without_searchable_changes_dispatches_nothing(): void
+    {
+        $product = Product::factory()->create(['is_active' => true]);
+
+        $this->resetQueue();
+
+        $product->touch(); // only updated_at changes
+
+        Queue::assertNotPushed(IndexProduct::class);
+        Queue::assertNotPushed(DeleteProductFromIndex::class);
+    }
+
+    public function test_deactivating_product_dispatches_delete_job(): void
+    {
+        $product = Product::factory()->create(['is_active' => true]);
+
+        $this->resetQueue();
+
+        $product->update(['is_active' => false]);
+
+        Queue::assertNotPushed(IndexProduct::class);
+        Queue::assertPushed(DeleteProductFromIndex::class, function ($job) use ($product) {
+            return $job->productId === $product->id;
+        });
+    }
+
+    public function test_reactivating_product_dispatches_index_job(): void
+    {
+        $product = Product::factory()->inactive()->create();
+
+        $this->resetQueue();
+
+        $product->update(['is_active' => true]);
+
+        Queue::assertPushed(IndexProduct::class, 1);
+        Queue::assertNotPushed(DeleteProductFromIndex::class);
+    }
+
     public function test_deleting_product_dispatches_delete_job(): void
     {
-        Queue::fake();
-
-        $product   = Product::factory()->create();
+        $product   = Product::factory()->create(['is_active' => true]);
         $productId = $product->id;
 
-        Queue::fake(); // Reset after create
+        $this->resetQueue();
         $product->delete();
 
         Queue::assertPushed(DeleteProductFromIndex::class, function ($job) use ($productId) {
             return $job->productId === $productId;
         });
+        Queue::assertPushedOn('indexing', DeleteProductFromIndex::class);
     }
 
     public function test_index_job_contains_correct_product(): void
     {
         Queue::fake();
 
-        $product = Product::factory()->create(['name' => 'Test Phone X99']);
+        $product = Product::factory()->create(['is_active' => true, 'name' => 'Test Phone X99']);
 
         Queue::assertPushed(IndexProduct::class, function ($job) use ($product) {
             return $job->product->id === $product->id
