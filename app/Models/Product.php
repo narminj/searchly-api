@@ -10,6 +10,7 @@ class Product extends Model
     use HasFactory;
 
     protected $fillable = [
+        'tenant_id',
         'name',
         'description',
         'category',
@@ -18,6 +19,7 @@ class Product extends Model
         'stock',
         'tags',
         'is_active',
+        'popularity',
         'latitude',
         'longitude',
     ];
@@ -25,12 +27,13 @@ class Product extends Model
     protected function casts(): array
     {
         return [
-            'tags'      => 'array',
-            'price'     => 'float',
-            'stock'     => 'integer',
-            'is_active' => 'boolean',
-            'latitude'  => 'float',
-            'longitude' => 'float',
+            'tags'       => 'array',
+            'price'      => 'float',
+            'stock'      => 'integer',
+            'is_active'  => 'boolean',
+            'popularity' => 'integer',
+            'latitude'   => 'float',
+            'longitude'  => 'float',
         ];
     }
 
@@ -42,6 +45,9 @@ class Product extends Model
     {
         return [
             'id'          => $this->id,
+            // Multi-tenancy: drives the tenant_id term filter and the completion
+            // suggester's tenant context (mapping reads it via path)
+            'tenant_id'   => $this->tenant_id ?? 'default',
             'name'        => $this->name,
             'description' => $this->description,
             'category'    => $this->category,
@@ -53,6 +59,10 @@ class Product extends Model
             'location'    => ($this->latitude && $this->longitude)
                 ? ['lat' => $this->latitude, 'lon' => $this->longitude]
                 : null,
+            // Completion suggester inputs: the product name and its brand
+            'suggest'     => ['input' => array_values(array_unique(array_filter([$this->name, $this->brand])))],
+            // rank_feature rejects non-positive values — omit via null instead
+            'popularity'  => $this->popularity > 0 ? (int) $this->popularity : null,
             'created_at'  => $this->created_at?->format('Y-m-d H:i:s'),
             'updated_at'  => $this->updated_at?->format('Y-m-d H:i:s'),
         ];

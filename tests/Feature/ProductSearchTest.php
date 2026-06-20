@@ -3,8 +3,12 @@
 namespace Tests\Feature;
 
 use App\Contracts\SearchRepositoryInterface;
-use App\Services\ElasticsearchService;
+use App\Events\SearchPerformed;
+use App\Models\Product;
+use Elastic\Transport\Exception\NoNodeAvailableException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Queue;
 use Mockery;
 use Tests\TestCase;
 
@@ -170,7 +174,7 @@ class ProductSearchTest extends TestCase
         $this->mockRepository
             ->shouldReceive('findById')
             ->once()
-            ->with(1)
+            ->with(1, 'default')
             ->andReturn(['id' => 1, 'name' => 'Samsung TV', 'price' => 1299.99]);
 
         $this->getJson('/api/products/1')
@@ -184,7 +188,7 @@ class ProductSearchTest extends TestCase
         $this->mockRepository
             ->shouldReceive('findById')
             ->once()
-            ->with(9999)
+            ->with(9999, 'default')
             ->andReturn([]);
 
         $this->getJson('/api/products/9999')->assertStatus(404);
@@ -197,7 +201,7 @@ class ProductSearchTest extends TestCase
         $this->mockRepository
             ->shouldReceive('suggest')
             ->once()
-            ->with('sam')
+            ->with('sam', 'default')
             ->andReturn(['Samsung Galaxy S24', 'Samsung TV 4K', 'Samsung Laptop']);
 
         $response = $this->getJson('/api/products/suggest?q=sam');
@@ -219,5 +223,148 @@ class ProductSearchTest extends TestCase
         $this->mockRepository->shouldNotReceive('suggest');
 
         $this->getJson('/api/products/suggest')->assertStatus(422);
+    }
+
+    // ── Pagination window (ES max_result_window = 10,000) ────────────────────
+
+    public function test_search_rejects_page_beyond_result_window(): void
+    {
+        $this->mockRepository->shouldNotReceive('search');
+
+        // 700 * 15 = 10,500 > 10,000
+        $this->getJson('/api/products/search?page=700&per_page=15')
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['page']);
+    }
+
+    public function test_search_allows_last_page_within_result_window(): void
+    {
+        $this->mockRepository
+            ->shouldReceive('search')
+            ->once()
+            ->andReturn($this->makeSearchResult());
+
+        // 666 * 15 = 9,990 <= 10,000
+        $this->getJson('/api/products/search?page=666&per_page=15')->assertOk();
+    }
+
+    // ── Filter array size caps ────────────────────────────────────────────────
+
+    public function test_search_rejects_more_than_ten_categories(): void
+    {
+        $this->mockRepository->shouldNotReceive('search');
+
+        $params = http_build_query(['categories' => array_map(fn ($i) => "cat{$i}", range(1, 11))]);
+
+        $this->getJson("/api/products/search?{$params}")
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['categories']);
+    }
+
+    public function test_search_preserves_zero_price_min_filter(): void
+    {
+        $this->mockRepository
+            ->shouldReceive('search')
+            ->once()
+            ->withArgs(function ($query, $filters) {
+                return array_key_exists('price_min', $filters) && $filters['price_min'] === '0';
+            })
+            ->andReturn($this->makeSearchResult());
+
+        $this->getJson('/api/products/search?price_min=0')->assertOk();
+    }
+
+    // ── Rate limiting ─────────────────────────────────────────────────────────
+
+    public function test_search_is_rate_limited_after_60_requests(): void
+    {
+        $this->mockRepository
+            ->shouldReceive('search')
+            ->times(60)
+            ->andReturn($this->makeSearchResult());
+
+        for ($i = 0; $i < 60; $i++) {
+            $this->getJson('/api/products/search')->assertOk();
+        }
+
+        $this->getJson('/api/products/search')->assertStatus(429);
+    }
+
+    // ── Analytics & click-through ─────────────────────────────────────────────
+
+    public function test_search_dispatches_analytics_event(): void
+    {
+        Event::fake([SearchPerformed::class]);
+
+        $this->mockRepository
+            ->shouldReceive('search')
+            ->once()
+            ->andReturn($this->makeSearchResult(['total' => 7, 'took_ms' => 12]));
+
+        $this->getJson('/api/products/search?q=nike&category=sports')->assertOk();
+
+        Event::assertDispatched(SearchPerformed::class, function (SearchPerformed $e) {
+            return $e->query === 'nike'
+                && $e->resultCount === 7
+                && $e->filters === ['category' => 'sports']
+                && $e->session !== '';
+        });
+    }
+
+    public function test_click_increments_popularity_without_reindex_job(): void
+    {
+        Queue::fake();
+
+        $product = Product::factory()->create(['is_active' => true, 'popularity' => 5]);
+        Queue::fake(); // reset the create dispatch
+
+        $this->postJson("/api/products/{$product->id}/click")->assertNoContent();
+
+        $this->assertEquals(6, $product->fresh()->popularity);
+        Queue::assertNothingPushed(); // clicks must never trigger index jobs
+    }
+
+    public function test_click_returns_404_for_missing_product(): void
+    {
+        $this->postJson('/api/products/999999/click')->assertStatus(404);
+    }
+
+    // ── Cursor pagination (search_after) ──────────────────────────────────────
+
+    public function test_search_passes_decoded_cursor_to_repository(): void
+    {
+        $cursor = base64_encode(json_encode([1.5, '2024-01-01 00:00:00', 42]));
+
+        $this->mockRepository
+            ->shouldReceive('search')
+            ->once()
+            ->withArgs(function ($query, $filters, $options) {
+                return $options['cursor'] === [1.5, '2024-01-01 00:00:00', 42];
+            })
+            ->andReturn($this->makeSearchResult());
+
+        $this->getJson('/api/products/search?cursor=' . urlencode($cursor))->assertOk();
+    }
+
+    public function test_search_rejects_malformed_cursor(): void
+    {
+        $this->mockRepository->shouldNotReceive('search');
+
+        $this->getJson('/api/products/search?cursor=not-valid-base64!!!')
+            ->assertStatus(422);
+    }
+
+    // ── Elasticsearch failure handling ───────────────────────────────────────
+
+    public function test_search_returns_503_json_when_elasticsearch_is_down(): void
+    {
+        $this->mockRepository
+            ->shouldReceive('search')
+            ->once()
+            ->andThrow(new NoNodeAvailableException('No alive nodes found in your cluster'));
+
+        $this->getJson('/api/products/search?q=samsung')
+            ->assertStatus(503)
+            ->assertExactJson(['message' => 'Search service unavailable.']);
     }
 }

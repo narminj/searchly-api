@@ -3,9 +3,13 @@
 namespace App\Http\Controllers\Api;
 
 use App\Contracts\SearchRepositoryInterface;
+use App\Events\SearchPerformed;
 use App\Http\Controllers\Controller;
+use App\Models\Product;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
+use OpenApi\Attributes as OA;
 
 class ProductSearchController extends Controller
 {
@@ -32,31 +36,109 @@ class ProductSearchController extends Controller
      *   geo_lat       - Latitude for geo-distance filter
      *   geo_lon       - Longitude for geo-distance filter
      *   geo_distance  - Distance radius (e.g. "50km")
+     *   with_aggs     - boolean (default 1): include facet aggregations.
+     *                   Send 0 beyond page 1 — they're the most expensive part.
+     *
+     * Zero-result responses include suggested_query ("did you mean") when
+     * the phrase suggester has a correction.
      */
+    #[OA\Get(
+        path: '/products/search',
+        summary: 'Search products',
+        description: 'Full-text product search (AZ/EN, fuzzy, synonyms) with filters, '
+            . 'sorting, faceted aggregations, highlighting, geo-distance and cursor pagination. '
+            . 'Zero-result responses include suggested_query ("did you mean").',
+        tags: ['Search'],
+        parameters: [
+            new OA\Parameter(name: 'q', in: 'query', description: 'Free-text query', schema: new OA\Schema(type: 'string', maxLength: 200)),
+            new OA\Parameter(name: 'category', in: 'query', description: 'Single category filter', schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'categories[]', in: 'query', description: 'Multiple categories (OR, max 10)', schema: new OA\Schema(type: 'array', items: new OA\Items(type: 'string'))),
+            new OA\Parameter(name: 'brand', in: 'query', description: 'Single brand filter', schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'brands[]', in: 'query', description: 'Multiple brands (OR, max 10)', schema: new OA\Schema(type: 'array', items: new OA\Items(type: 'string'))),
+            new OA\Parameter(name: 'tags[]', in: 'query', description: 'Tag filters (AND, max 10)', schema: new OA\Schema(type: 'array', items: new OA\Items(type: 'string'))),
+            new OA\Parameter(name: 'price_min', in: 'query', schema: new OA\Schema(type: 'number', format: 'float')),
+            new OA\Parameter(name: 'price_max', in: 'query', schema: new OA\Schema(type: 'number', format: 'float')),
+            new OA\Parameter(name: 'in_stock', in: 'query', description: 'Only in-stock products', schema: new OA\Schema(type: 'boolean')),
+            new OA\Parameter(name: 'sort', in: 'query', schema: new OA\Schema(type: 'string', enum: ['relevance', 'price_asc', 'price_desc', 'newest', 'oldest', 'name', 'stock_desc'], default: 'relevance')),
+            new OA\Parameter(name: 'page', in: 'query', description: 'Page number (max = 10000/per_page)', schema: new OA\Schema(type: 'integer', default: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', schema: new OA\Schema(type: 'integer', maximum: 100, default: 15)),
+            new OA\Parameter(name: 'cursor', in: 'query', description: 'search_after cursor; when set, page/from are ignored', schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'with_aggs', in: 'query', description: 'Include facet aggregations (default 1; send 0 beyond page 1)', schema: new OA\Schema(type: 'boolean', default: true)),
+            new OA\Parameter(name: 'from_date', in: 'query', description: 'created_at >= (Y-m-d)', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'to_date', in: 'query', description: 'created_at <= (Y-m-d)', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'geo_lat', in: 'query', schema: new OA\Schema(type: 'number', format: 'float')),
+            new OA\Parameter(name: 'geo_lon', in: 'query', schema: new OA\Schema(type: 'number', format: 'float')),
+            new OA\Parameter(name: 'geo_distance', in: 'query', description: 'Radius, e.g. 50km / 100m / 30mi', schema: new OA\Schema(type: 'string')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Search results with pagination, aggregations and timing', content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(type: 'object')),
+                    new OA\Property(property: 'total', type: 'integer', example: 47),
+                    new OA\Property(property: 'total_is_exact', type: 'boolean', example: true),
+                    new OA\Property(property: 'per_page', type: 'integer', example: 15),
+                    new OA\Property(property: 'current_page', type: 'integer', example: 1),
+                    new OA\Property(property: 'last_page', type: 'integer', example: 4),
+                    new OA\Property(property: 'next_cursor', type: 'string', nullable: true),
+                    new OA\Property(property: 'aggregations', type: 'object', nullable: true),
+                    new OA\Property(property: 'suggested_query', type: 'string', nullable: true),
+                    new OA\Property(property: 'took_ms', type: 'integer', example: 12),
+                    new OA\Property(property: 'max_score', type: 'number', format: 'float', nullable: true),
+                ]
+            )),
+            new OA\Response(response: 422, description: 'Validation error (e.g. page over cap, invalid cursor)'),
+            new OA\Response(response: 429, description: 'Rate limit exceeded (60/min)'),
+            new OA\Response(response: 503, description: 'Elasticsearch unavailable'),
+        ]
+    )]
     public function search(Request $request): JsonResponse
     {
+        // ES rejects from+size > max_result_window (10,000), so the page cap
+        // must be derived from per_page, not a fixed number
+        $perPage = min(100, max(1, (int) $request->input('per_page', 15)));
+        $maxPage = max(1, intdiv(10000, $perPage));
+
         $validated = $request->validate([
             'q'            => 'nullable|string|max:200',
             'category'     => 'nullable|string|max:100',
-            'categories'   => 'nullable|array',
+            'categories'   => 'nullable|array|max:10',
             'categories.*' => 'string|max:100',
             'brand'        => 'nullable|string|max:100',
-            'brands'       => 'nullable|array',
+            'brands'       => 'nullable|array|max:10',
             'brands.*'     => 'string|max:100',
-            'tags'         => 'nullable|array',
+            'tags'         => 'nullable|array|max:10',
             'tags.*'       => 'string|max:50',
             'price_min'    => 'nullable|numeric|min:0',
             'price_max'    => 'nullable|numeric|min:0',
             'in_stock'     => 'nullable|boolean',
             'sort'         => 'nullable|in:relevance,price_asc,price_desc,newest,oldest,name,stock_desc',
-            'page'         => 'nullable|integer|min:1|max:1000',
+            'page'         => 'nullable|integer|min:1|max:' . $maxPage,
             'per_page'     => 'nullable|integer|min:1|max:100',
             'from_date'    => 'nullable|date_format:Y-m-d',
             'to_date'      => 'nullable|date_format:Y-m-d',
             'geo_lat'      => 'nullable|numeric|between:-90,90',
             'geo_lon'      => 'nullable|numeric|between:-180,180',
             'geo_distance' => 'nullable|string|regex:/^\d+(\.\d+)?(km|m|mi|yd)$/',
+            // Aggregations are the most expensive part of a search request —
+            // clients should send with_aggs=0 beyond page 1
+            'with_aggs'    => 'nullable|boolean',
+            // Opaque next_cursor from a previous response (search_after);
+            // when present, page/from are ignored
+            'cursor'       => 'nullable|string|max:512',
         ]);
+
+        $cursor = null;
+        if (! empty($validated['cursor'])) {
+            $cursor = $this->decodeCursor($validated['cursor']);
+
+            if ($cursor === null) {
+                return response()->json(['message' => 'Invalid cursor.'], 422);
+            }
+        }
+
+        // Strip only absent params — a plain array_filter() would also drop
+        // legitimate falsy values like price_min=0 or in_stock=false
+        $notNull = static fn ($value) => $value !== null;
 
         $filters = array_filter([
             'category'   => $validated['category'] ?? null,
@@ -67,7 +149,7 @@ class ProductSearchController extends Controller
             'price_min'  => $validated['price_min'] ?? null,
             'price_max'  => $validated['price_max'] ?? null,
             'in_stock'   => $validated['in_stock'] ?? null,
-        ]);
+        ], $notNull);
 
         $options = array_filter([
             'sort'         => $validated['sort'] ?? null,
@@ -78,11 +160,103 @@ class ProductSearchController extends Controller
             'geo_lat'      => $validated['geo_lat'] ?? null,
             'geo_lon'      => $validated['geo_lon'] ?? null,
             'geo_distance' => $validated['geo_distance'] ?? null,
-        ]);
+            'with_aggs'    => isset($validated['with_aggs']) ? (bool) $validated['with_aggs'] : null,
+            'cursor'       => $cursor,
+        ], $notNull);
+
+        // Tenant isolation — resolved from X-Tenant-ID (default tenant otherwise)
+        $options['tenant'] = $this->resolveTenant($request);
 
         $result = $this->repository->search($validated['q'] ?? '', $filters, $options);
 
+        // Analytics, off the request path (queued listener). Session is an
+        // anonymous hash — no PII leaves the request.
+        SearchPerformed::dispatch(
+            $validated['q'] ?? '',
+            $filters,
+            $result['total'] ?? 0,
+            $result['took_ms'] ?? 0,
+            (int) ($validated['page'] ?? 1),
+            $result['suggested_query'] ?? null,
+            sha1($request->ip() . '|' . $request->userAgent()),
+        );
+
         return response()->json($result);
+    }
+
+    /**
+     * POST /api/products/{id}/click
+     *
+     * Click-through tracking: atomically bumps the product's popularity
+     * counter. Query-builder increment on purpose — no model events, so a
+     * click never triggers a reindex job (the nightly in-place reindex
+     * carries popularity into Elasticsearch).
+     */
+    #[OA\Post(
+        path: '/products/{id}/click',
+        summary: 'Track a product click',
+        description: 'Atomically increments the product popularity counter (feeds relevance boosting). No reindex job is triggered.',
+        tags: ['Products'],
+        parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
+        responses: [
+            new OA\Response(response: 204, description: 'Click recorded'),
+            new OA\Response(response: 404, description: 'Product not found'),
+            new OA\Response(response: 429, description: 'Rate limit exceeded'),
+        ]
+    )]
+    public function click(Request $request, int $id): Response|JsonResponse
+    {
+        // Scoped to the tenant so a click can't touch another tenant's product.
+        // Gated until the tenant_id column exists (see config 'multi_tenancy').
+        $updated = Product::query()
+            ->when(
+                config('elasticsearch.multi_tenancy'),
+                fn ($q) => $q->where('tenant_id', $this->resolveTenant($request)),
+            )
+            ->whereKey($id)
+            ->increment('popularity');
+
+        if ($updated === 0) {
+            return response()->json(['message' => 'Product not found.'], 404);
+        }
+
+        return response()->noContent();
+    }
+
+    /**
+     * Resolve the request's tenant from the X-Tenant-ID header, falling back to
+     * the configured default. Only safe identifiers are accepted; anything else
+     * (or a missing header) yields the default tenant.
+     */
+    private function resolveTenant(Request $request): string
+    {
+        $tenant = (string) $request->header('X-Tenant-ID', '');
+
+        return preg_match('/^[A-Za-z0-9_-]{1,64}$/', $tenant)
+            ? $tenant
+            : config('elasticsearch.default_tenant');
+    }
+
+    /**
+     * Cursors are base64(json(sort values of the last hit)) produced by us in
+     * next_cursor. Reject anything that doesn't decode to a small flat array
+     * of scalars before it reaches Elasticsearch.
+     */
+    private function decodeCursor(string $cursor): ?array
+    {
+        $decoded = json_decode(base64_decode($cursor, true) ?: '', true);
+
+        if (! is_array($decoded) || $decoded === [] || count($decoded) > 4) {
+            return null;
+        }
+
+        foreach ($decoded as $value) {
+            if (! is_scalar($value) && $value !== null) {
+                return null;
+            }
+        }
+
+        return array_values($decoded);
     }
 
     /**
@@ -90,9 +264,20 @@ class ProductSearchController extends Controller
      *
      * Fetch a single product document from Elasticsearch by ID.
      */
-    public function show(int $id): JsonResponse
+    #[OA\Get(
+        path: '/products/{id}',
+        summary: 'Get a product by ID',
+        description: 'Fetch a single product document from Elasticsearch.',
+        tags: ['Products'],
+        parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
+        responses: [
+            new OA\Response(response: 200, description: 'Product document', content: new OA\JsonContent(properties: [new OA\Property(property: 'data', type: 'object')])),
+            new OA\Response(response: 404, description: 'Product not found'),
+        ]
+    )]
+    public function show(Request $request, int $id): JsonResponse
     {
-        $product = $this->repository->findById($id);
+        $product = $this->repository->findById($id, $this->resolveTenant($request));
 
         if (empty($product)) {
             return response()->json(['message' => 'Product not found.'], 404);
@@ -104,14 +289,29 @@ class ProductSearchController extends Controller
     /**
      * GET /api/products/suggest?q=sam
      *
-     * Autocomplete suggestions using edge n-gram on the name field.
-     * Returns up to 10 product name strings.
+     * Autocomplete suggestions: completion suggester (fuzzy) with a
+     * search_as_you_type bool_prefix fallback. Returns up to 10 name strings.
      */
+    #[OA\Get(
+        path: '/products/suggest',
+        summary: 'Autocomplete suggestions',
+        description: 'Prefix-based product name suggestions (completion suggester + search_as_you_type fallback). Minimum 2 characters.',
+        tags: ['Suggest'],
+        parameters: [new OA\Parameter(name: 'q', in: 'query', required: true, schema: new OA\Schema(type: 'string', minLength: 2, maxLength: 100))],
+        responses: [
+            new OA\Response(response: 200, description: 'Up to 10 suggestions', content: new OA\JsonContent(properties: [new OA\Property(property: 'suggestions', type: 'array', items: new OA\Items(type: 'string'))])),
+            new OA\Response(response: 422, description: 'Validation error (q too short)'),
+            new OA\Response(response: 429, description: 'Rate limit exceeded (120/min)'),
+        ]
+    )]
     public function suggest(Request $request): JsonResponse
     {
         $request->validate(['q' => 'required|string|min:2|max:100']);
 
-        $suggestions = $this->repository->suggest($request->string('q')->toString());
+        $suggestions = $this->repository->suggest(
+            $request->string('q')->toString(),
+            $this->resolveTenant($request),
+        );
 
         return response()->json(['suggestions' => $suggestions]);
     }

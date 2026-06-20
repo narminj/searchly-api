@@ -23,6 +23,14 @@ class ElasticsearchDeleteIndex extends Command
             return self::SUCCESS;
         }
 
+        // Aliases can't be deleted with the delete-index API — and deleting
+        // what's behind a live alias is rarely what you want from here
+        if ($backing = $es->getAliasIndices($indexName)) {
+            $this->error("'{$indexName}' is an alias pointing to: " . implode(', ', $backing) . '. Pass a physical index name instead.');
+
+            return self::FAILURE;
+        }
+
         if (! $this->option('force')) {
             if (! $this->confirm("Are you sure you want to DELETE index '{$indexName}'? This cannot be undone.")) {
                 $this->info('Aborted.');

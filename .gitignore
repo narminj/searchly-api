@@ -8,6 +8,23 @@
 .env
 .env.backup
 .env.production
+.env.bak
+.env.bak.*
+.env.*.bak
+*.bak
+
+# Runtime / generated storage (never commit)
+/storage/framework/sessions/*
+!/storage/framework/sessions/.gitkeep
+/storage/framework/views/*
+!/storage/framework/views/.gitkeep
+/storage/framework/cache/data/*
+!/storage/framework/cache/data/.gitkeep
+/storage/logs/*
+!/storage/logs/.gitkeep
+/storage/api-docs
+/storage/app/docs
+
 .phpunit.result.cache
 Homestead.json
 Homestead.yaml

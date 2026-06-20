@@ -64,6 +64,7 @@ class ProductFactory extends Factory
         $name    = "{$brand} {$product} " . $this->faker->bothify('??-###');
 
         return [
+            'tenant_id'   => 'default',
             'name'        => $name,
             'description' => $this->faker->paragraphs(2, true),
             'category'    => $category,
@@ -72,6 +73,8 @@ class ProductFactory extends Factory
             'stock'       => $this->faker->numberBetween(0, 500),
             'tags'        => $this->faker->randomElements($data['tags'], $this->faker->numberBetween(2, 5)),
             'is_active'   => $this->faker->boolean(85), // 85% active
+            // Skewed: most products barely clicked, a few are hits
+            'popularity'  => $this->faker->boolean(70) ? $this->faker->numberBetween(0, 20) : $this->faker->numberBetween(50, 500),
             'latitude'    => $this->faker->latitude(35, 55),
             'longitude'   => $this->faker->longitude(25, 65),
         ];
@@ -95,5 +98,10 @@ class ProductFactory extends Factory
     public function inactive(): static
     {
         return $this->state(['is_active' => false]);
+    }
+
+    public function forTenant(string $tenant): static
+    {
+        return $this->state(['tenant_id' => $tenant]);
     }
 }

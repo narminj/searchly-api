@@ -27,11 +27,16 @@
         <env name="DB_DATABASE" value=":memory:"/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="PULSE_ENABLED" value="false"/>
-        <env name="QUEUE_CONNECTION" value="sync"/>
+        <!-- database (not sync): a test that forgets Queue::fake() must never
+             execute index jobs against a real Elasticsearch -->
+        <env name="QUEUE_CONNECTION" value="database"/>
         <env name="SESSION_DRIVER" value="array"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="ELASTICSEARCH_HOST" value="localhost:9200"/>
         <env name="ELASTICSEARCH_SSL_VERIFY" value="false"/>
         <env name="ELASTICSEARCH_PRODUCTS_INDEX" value="products_test"/>
+        <!-- Exercise the multi-tenancy code paths in tests (production stays off
+             until the data layer is migrated) -->
+        <env name="MULTI_TENANCY_ENABLED" value="true"/>
     </php>
 </phpunit>

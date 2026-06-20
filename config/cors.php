@@ -17,6 +17,9 @@ return [
     'allowed_methods' => ['*'],
 
     'allowed_origins' => [
+        // Production SPA origin — committed so CORS works even if FRONTEND_URL is unset
+        'https://searchly.narmin.dev',
+        // Local development
         env('FRONTEND_URL', 'http://localhost:5173'),
         'http://localhost:3000',
         'http://127.0.0.1:5173',

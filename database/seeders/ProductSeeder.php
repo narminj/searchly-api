@@ -5,7 +5,6 @@ namespace Database\Seeders;
 use App\Models\Product;
 use App\Services\ElasticsearchService;
 use Illuminate\Database\Seeder;
-use Illuminate\Database\Eloquent\Model;
 
 class ProductSeeder extends Seeder
 {
@@ -13,16 +12,27 @@ class ProductSeeder extends Seeder
 
     public function run(): void
     {
-        // Suppress observer events during DB seeding so we can do one bulk ES call
-        Model::withoutObservers(function () {
+        // Suppress model events during DB seeding so we can do one bulk ES call
+        // instead of 150 observer-dispatched jobs
+        Product::withoutEvents(function () {
             Product::factory()->count(150)->create();
         });
 
         $this->command->info('Created 150 products in database.');
 
-        // Bulk index all products into Elasticsearch
-        $index    = config('elasticsearch.indices.products.name');
-        $products = Product::all();
+        // Bulk index into Elasticsearch — only active products (the index
+        // never holds inactive ones, see ProductObserver)
+        $index = config('elasticsearch.indices.products.name');
+
+        if (! $this->es->existsIndex($index)) {
+            // Don't let the bulk call auto-create an unmapped index —
+            // elasticsearch:migrate builds it with proper settings/mappings
+            $this->command->warn("Index/alias '{$index}' does not exist — skipping ES indexing. Run: php artisan elasticsearch:migrate products");
+
+            return;
+        }
+
+        $products = Product::where('is_active', true)->get();
 
         $documents = $products->map(fn (Product $p) => $p->toSearchArray())->all();
 

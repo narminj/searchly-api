@@ -21,7 +21,7 @@ class ElasticsearchService
     // Index Management
     // -------------------------------------------------------------------------
 
-    public function createIndex(string $index, array $settings = [], array $mappings = []): bool
+    public function createIndex(string $index, array $settings = [], array $mappings = [], array $aliases = []): bool
     {
         try {
             $params = ['index' => $index, 'body' => []];
@@ -31,6 +31,9 @@ class ElasticsearchService
             }
             if ($mappings) {
                 $params['body']['mappings'] = $mappings;
+            }
+            if ($aliases) {
+                $params['body']['aliases'] = $aliases;
             }
 
             $response = $this->client->indices()->create($params);
@@ -108,18 +111,143 @@ class ElasticsearchService
         }
     }
 
+    /**
+     * Cluster health (status, node count, active shards). Returns an empty array
+     * when Elasticsearch is unreachable — catches every Throwable on purpose so
+     * the health endpoint can report "down" instead of erroring out.
+     */
+    public function clusterHealth(): array
+    {
+        try {
+            return $this->client->cluster()->health()->asArray();
+        } catch (\Throwable $e) {
+            Log::error('ES clusterHealth failed', ['error' => $e->getMessage()]);
+
+            return [];
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Aliases & Versioned Indices
+    // -------------------------------------------------------------------------
+
+    /**
+     * Physical indices behind an alias. Empty array when the alias doesn't exist.
+     */
+    public function getAliasIndices(string $alias): array
+    {
+        try {
+            if (! $this->client->indices()->existsAlias(['name' => $alias])->asBool()) {
+                return [];
+            }
+
+            return array_keys($this->client->indices()->getAlias(['name' => $alias])->asArray());
+        } catch (ClientResponseException | ServerResponseException | NoNodeAvailableException $e) {
+            Log::warning('ES getAliasIndices failed', ['alias' => $alias, 'error' => $e->getMessage()]);
+
+            return [];
+        }
+    }
+
+    /**
+     * Atomically apply a set of alias actions (add / remove / remove_index).
+     * All actions succeed or fail together — this is what makes zero-downtime
+     * index swaps possible.
+     */
+    public function updateAliases(array $actions): bool
+    {
+        try {
+            return $this->client->indices()->updateAliases(['body' => ['actions' => $actions]])->asBool();
+        } catch (ClientResponseException | ServerResponseException $e) {
+            Log::error('ES updateAliases failed', ['actions' => $actions, 'error' => $e->getMessage()]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Index names matching a pattern (e.g. "products_v*").
+     */
+    public function listIndices(string $pattern): array
+    {
+        try {
+            return array_keys($this->client->indices()->get(['index' => $pattern])->asArray());
+        } catch (ClientResponseException $e) {
+            if ($e->getCode() === 404) {
+                return [];
+            }
+            Log::error('ES listIndices failed', ['pattern' => $pattern, 'error' => $e->getMessage()]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Update dynamic index settings (refresh_interval, number_of_replicas, …).
+     */
+    public function putSettings(string $index, array $settings): bool
+    {
+        try {
+            return $this->client->indices()->putSettings([
+                'index' => $index,
+                'body'  => ['index' => $settings],
+            ])->asBool();
+        } catch (ClientResponseException | ServerResponseException $e) {
+            Log::error('ES putSettings failed', ['index' => $index, 'error' => $e->getMessage()]);
+            throw $e;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Synonyms (ES 8.10+ Synonyms API)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Create or replace a synonyms set. Search analyzers referencing the set
+     * via an updateable synonym_graph filter are reloaded automatically —
+     * dictionary changes need no reindex.
+     */
+    public function putSynonymsSet(string $id, array $rules): array
+    {
+        try {
+            return $this->client->synonyms()->putSynonym([
+                'id'   => $id,
+                'body' => ['synonyms_set' => $rules],
+            ])->asArray();
+        } catch (ClientResponseException | ServerResponseException $e) {
+            Log::error('ES putSynonymsSet failed', ['id' => $id, 'error' => $e->getMessage()]);
+            throw $e;
+        }
+    }
+
+    public function getSynonymsSet(string $id): array
+    {
+        try {
+            return $this->client->synonyms()->getSynonym(['id' => $id])->asArray();
+        } catch (ClientResponseException $e) {
+            if ($e->getCode() === 404) {
+                return [];
+            }
+            Log::error('ES getSynonymsSet failed', ['id' => $id, 'error' => $e->getMessage()]);
+            throw $e;
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Document CRUD
     // -------------------------------------------------------------------------
 
-    public function indexDocument(string $index, int|string $id, array $body): array
+    /**
+     * Index a document. Pass null as $id for ES auto-generated IDs
+     * (append-only data like analytics logs).
+     */
+    public function indexDocument(string $index, int|string|null $id, array $body): array
     {
         try {
-            return $this->client->index([
-                'index' => $index,
-                'id'    => $id,
-                'body'  => $body,
-            ])->asArray();
+            $params = ['index' => $index, 'body' => $body];
+            if ($id !== null) {
+                $params['id'] = $id;
+            }
+
+            return $this->client->index($params)->asArray();
         } catch (ClientResponseException | ServerResponseException $e) {
             Log::error('ES indexDocument failed', ['index' => $index, 'id' => $id, 'error' => $e->getMessage()]);
             throw $e;
@@ -150,7 +278,15 @@ class ElasticsearchService
                 'index' => $index,
                 'id'    => $id,
             ])->asArray();
-        } catch (ClientResponseException | ServerResponseException $e) {
+        } catch (ClientResponseException $e) {
+            // Missing document = already deleted; treat as success so delete
+            // jobs are idempotent and don't burn retries on a 404
+            if ($e->getCode() === 404) {
+                return [];
+            }
+            Log::error('ES deleteDocument failed', ['index' => $index, 'id' => $id, 'error' => $e->getMessage()]);
+            throw $e;
+        } catch (ServerResponseException $e) {
             Log::error('ES deleteDocument failed', ['index' => $index, 'id' => $id, 'error' => $e->getMessage()]);
             throw $e;
         }
