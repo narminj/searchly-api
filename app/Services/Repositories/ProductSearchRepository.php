@@ -99,7 +99,7 @@ class ProductSearchRepository implements SearchRepositoryInterface
         }
 
         // Tenant isolation: never expose a document owned by another tenant
-        if (config('elasticsearch.multi_tenancy') && ($doc['_source']['tenant_id'] ?? 'default') !== $tenant) {
+        if (config('elasticsearch.multi_tenancy') && ($doc['_source']['tenant_id'] ?? config('elasticsearch.default_tenant')) !== $tenant) {
             return [];
         }
 

@@ -47,7 +47,7 @@ class Product extends Model
             'id'          => $this->id,
             // Multi-tenancy: drives the tenant_id term filter and the completion
             // suggester's tenant context (mapping reads it via path)
-            'tenant_id'   => $this->tenant_id ?? 'default',
+            'tenant_id'   => $this->tenant_id ?? config('elasticsearch.default_tenant'),
             'name'        => $this->name,
             'description' => $this->description,
             'category'    => $this->category,

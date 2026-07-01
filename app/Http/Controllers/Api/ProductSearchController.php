@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Contracts\SearchRepositoryInterface;
 use App\Events\SearchPerformed;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\SearchProductsRequest;
 use App\Models\Product;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -91,92 +92,25 @@ class ProductSearchController extends Controller
             new OA\Response(response: 503, description: 'Elasticsearch unavailable'),
         ]
     )]
-    public function search(Request $request): JsonResponse
+    public function search(SearchProductsRequest $request): JsonResponse
     {
-        // ES rejects from+size > max_result_window (10,000), so the page cap
-        // must be derived from per_page, not a fixed number
-        $perPage = min(100, max(1, (int) $request->input('per_page', 15)));
-        $maxPage = max(1, intdiv(10000, $perPage));
-
-        $validated = $request->validate([
-            'q'            => 'nullable|string|max:200',
-            'category'     => 'nullable|string|max:100',
-            'categories'   => 'nullable|array|max:10',
-            'categories.*' => 'string|max:100',
-            'brand'        => 'nullable|string|max:100',
-            'brands'       => 'nullable|array|max:10',
-            'brands.*'     => 'string|max:100',
-            'tags'         => 'nullable|array|max:10',
-            'tags.*'       => 'string|max:50',
-            'price_min'    => 'nullable|numeric|min:0',
-            'price_max'    => 'nullable|numeric|min:0',
-            'in_stock'     => 'nullable|boolean',
-            'sort'         => 'nullable|in:relevance,price_asc,price_desc,newest,oldest,name,stock_desc',
-            'page'         => 'nullable|integer|min:1|max:' . $maxPage,
-            'per_page'     => 'nullable|integer|min:1|max:100',
-            'from_date'    => 'nullable|date_format:Y-m-d',
-            'to_date'      => 'nullable|date_format:Y-m-d',
-            'geo_lat'      => 'nullable|numeric|between:-90,90',
-            'geo_lon'      => 'nullable|numeric|between:-180,180',
-            'geo_distance' => 'nullable|string|regex:/^\d+(\.\d+)?(km|m|mi|yd)$/',
-            // Aggregations are the most expensive part of a search request —
-            // clients should send with_aggs=0 beyond page 1
-            'with_aggs'    => 'nullable|boolean',
-            // Opaque next_cursor from a previous response (search_after);
-            // when present, page/from are ignored
-            'cursor'       => 'nullable|string|max:512',
-        ]);
-
-        $cursor = null;
-        if (! empty($validated['cursor'])) {
-            $cursor = $this->decodeCursor($validated['cursor']);
-
-            if ($cursor === null) {
-                return response()->json(['message' => 'Invalid cursor.'], 422);
-            }
-        }
-
-        // Strip only absent params — a plain array_filter() would also drop
-        // legitimate falsy values like price_min=0 or in_stock=false
-        $notNull = static fn ($value) => $value !== null;
-
-        $filters = array_filter([
-            'category'   => $validated['category'] ?? null,
-            'categories' => $validated['categories'] ?? null,
-            'brand'      => $validated['brand'] ?? null,
-            'brands'     => $validated['brands'] ?? null,
-            'tags'       => $validated['tags'] ?? null,
-            'price_min'  => $validated['price_min'] ?? null,
-            'price_max'  => $validated['price_max'] ?? null,
-            'in_stock'   => $validated['in_stock'] ?? null,
-        ], $notNull);
-
-        $options = array_filter([
-            'sort'         => $validated['sort'] ?? null,
-            'page'         => $validated['page'] ?? null,
-            'per_page'     => $validated['per_page'] ?? null,
-            'from_date'    => $validated['from_date'] ?? null,
-            'to_date'      => $validated['to_date'] ?? null,
-            'geo_lat'      => $validated['geo_lat'] ?? null,
-            'geo_lon'      => $validated['geo_lon'] ?? null,
-            'geo_distance' => $validated['geo_distance'] ?? null,
-            'with_aggs'    => isset($validated['with_aggs']) ? (bool) $validated['with_aggs'] : null,
-            'cursor'       => $cursor,
-        ], $notNull);
+        $query   = $request->searchQuery();
+        $filters = $request->filters();
 
         // Tenant isolation — resolved from X-Tenant-ID (default tenant otherwise)
+        $options = $request->options();
         $options['tenant'] = $this->resolveTenant($request);
 
-        $result = $this->repository->search($validated['q'] ?? '', $filters, $options);
+        $result = $this->repository->search($query, $filters, $options);
 
         // Analytics, off the request path (queued listener). Session is an
         // anonymous hash — no PII leaves the request.
         SearchPerformed::dispatch(
-            $validated['q'] ?? '',
+            $query,
             $filters,
             $result['total'] ?? 0,
             $result['took_ms'] ?? 0,
-            (int) ($validated['page'] ?? 1),
+            $request->page(),
             $result['suggested_query'] ?? null,
             sha1($request->ip() . '|' . $request->userAgent()),
         );
@@ -235,28 +169,6 @@ class ProductSearchController extends Controller
         return preg_match('/^[A-Za-z0-9_-]{1,64}$/', $tenant)
             ? $tenant
             : config('elasticsearch.default_tenant');
-    }
-
-    /**
-     * Cursors are base64(json(sort values of the last hit)) produced by us in
-     * next_cursor. Reject anything that doesn't decode to a small flat array
-     * of scalars before it reaches Elasticsearch.
-     */
-    private function decodeCursor(string $cursor): ?array
-    {
-        $decoded = json_decode(base64_decode($cursor, true) ?: '', true);
-
-        if (! is_array($decoded) || $decoded === [] || count($decoded) > 4) {
-            return null;
-        }
-
-        foreach ($decoded as $value) {
-            if (! is_scalar($value) && $value !== null) {
-                return null;
-            }
-        }
-
-        return array_values($decoded);
     }
 
     /**
