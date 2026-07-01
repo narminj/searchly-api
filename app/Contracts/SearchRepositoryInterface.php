@@ -22,11 +22,6 @@ interface SearchRepositoryInterface
     public function findById(int $id, string $tenant = 'default'): array;
 
     /**
-     * Execute a custom aggregation query and return the raw aggregation buckets.
-     */
-    public function aggregate(array $params): array;
-
-    /**
      * Prefix-based autocomplete suggestions for a given search string, isolated
      * to the tenant via the completion field's tenant context.
      * Returns an array of matching name strings.

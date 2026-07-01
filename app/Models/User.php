@@ -17,12 +17,6 @@ class User extends Authenticatable
         'role',
     ];
 
-    /** Role-based access control — this user is an administrator. */
-    public function isAdmin(): bool
-    {
-        return $this->role === 'admin';
-    }
-
     /** True when the user holds any of the given roles (admin is allowed everywhere). */
     public function hasRole(string ...$roles): bool
     {

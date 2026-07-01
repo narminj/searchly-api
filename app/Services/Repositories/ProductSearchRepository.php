@@ -106,13 +106,6 @@ class ProductSearchRepository implements SearchRepositoryInterface
         return array_merge(['id' => $doc['_id']], $doc['_source'] ?? []);
     }
 
-    public function aggregate(array $params): array
-    {
-        $response = $this->es->search($this->index, array_merge(['size' => 0], $params));
-
-        return $response['aggregations'] ?? [];
-    }
-
     /**
      * Autocomplete: completion suggester first (in-memory FST, ~1ms, fuzzy),
      * falling back to typo-tolerant search-as-you-type when it finds little —
