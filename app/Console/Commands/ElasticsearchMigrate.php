@@ -70,6 +70,10 @@ class ElasticsearchMigrate extends Command
             ->each(function ($products) use ($es, $next, $bar, &$errors) {
                 $documents = $products->map(fn (Product $p) => $p->toSearchArray())->all();
 
+                // No per-chunk try/catch here (unlike elasticsearch:reindex): a
+                // transport-level bulk failure must abort the whole migration.
+                // The alias is never swapped, so the live index stays untouched
+                // and the half-built '{$next}' index is left in place for inspection.
                 $result  = $es->bulkIndex($next, $documents);
                 $errors += collect($result['items'] ?? [])
                     ->filter(fn ($item) => isset($item['index']['error']))
